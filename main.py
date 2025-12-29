@@ -18,4 +18,4 @@ def health_check():
 
 if __name__ == '__main__':
     # debug=True é ótimo para desenvolvimento, mostra erros detalhados
-    app.run(host='0.0.0.0', port=5015, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)

@@ -3,7 +3,6 @@ import pandas as pd
 import geopandas as gpd
 from unidecode import unidecode
 
-# 1. Configuração de Caminhos
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 
@@ -13,72 +12,109 @@ MAPA_MESES = {
     9: 'SET', 10: 'OUT', 11: 'NOV', 12: 'DEZ'
 }
 
+def normalizar_texto(texto):
+    if not isinstance(texto, str): return ""
+    return unidecode(texto).upper().strip()
+
+def processar_csv(caminho_csv, coluna_mes):
+    if not os.path.exists(caminho_csv): return None
+    try:
+        df = pd.read_csv(caminho_csv)
+        col_municipio = df.columns[0] 
+        for col in df.columns:
+            if 'MUNICIPIO' in col.upper():
+                col_municipio = col
+                break
+        df['MUNICIPIO_NORM'] = df[col_municipio].apply(normalizar_texto)
+
+        if coluna_mes is None:
+            colunas_existentes = [c for c in MAPA_MESES.values() if c in df.columns]
+            valor_mes = df[colunas_existentes].sum(axis=1).fillna(0).astype(int)
+        else:
+            if coluna_mes not in df.columns: valor_mes = 0
+            else: valor_mes = df[coluna_mes].fillna(0).astype(int)
+
+        df_temp = pd.DataFrame({'MUNICIPIO_NORM': df['MUNICIPIO_NORM'], 'VALOR_MES': valor_mes})
+        return df_temp.groupby('MUNICIPIO_NORM', as_index=False).sum()
+    except Exception as e:
+        print(f"Erro CSV {caminho_csv}: {e}")
+        return None
+
 def carregar_dados_por_ano_mes(ano, mes):
-    # --- VALIDAÇÃO ---
     try:
         ano = int(ano)
         mes = int(mes)
-    except ValueError:
-        raise ValueError("Ano e Mês devem ser números válidos.")
-
-    coluna_mes = MAPA_MESES.get(mes)
-    if not coluna_mes:
-        raise ValueError("Mês inválido (use 1 a 12).")
-
-    # --- DEFINIÇÃO DOS ARQUIVOS ---
-    nome_csv = f"violencia_domestica_pe_{ano}.csv"
-    csv_path = os.path.join(DATA_DIR, 'csv', nome_csv)
-
-    # AQUI ESTA A MUDANÇA: Caminho entrando na subpasta
-    # data/shapefile/Pe_municipios_2024/SEU_ARQUIVO.shp
+    except ValueError: raise ValueError("Erro data")
     
-    # ⚠️ ⚠️ ⚠️ ATENÇÃO: SUBSTITUA O NOME ABAIXO PELO NOME REAL DO ARQUIVO .SHP ⚠️ ⚠️ ⚠️
-    # Pode ser 'PE_Municipios_2023.shp', '26MUE250GC_SIR.shp', etc.
-    nome_arquivo_shp_real = 'PE_Municipios_2024.shp' 
+    if mes == 0: coluna_mes = None
+    else: coluna_mes = MAPA_MESES.get(mes)
+
+    # --- CAMINHOS ---
+    path_violencia = os.path.join(DATA_DIR, 'csv', f"violencia_domestica_pe_{ano}.csv")
+    path_estupro = os.path.join(DATA_DIR, 'csv', f"casos_estupro_pe_{ano}.csv")
+    path_populacao = os.path.join(DATA_DIR, 'csv', "populacao_pe.csv")
+
+    nome_shp = 'PE_Municipios_2024.shp' 
+    path_shp = os.path.join(DATA_DIR, 'shapefile', 'Pe_municipios_2024', nome_shp)
     
-    shp_path = os.path.join(DATA_DIR, 'shapefile', 'Pe_municipios_2024', nome_arquivo_shp_real)
+    if not os.path.exists(path_shp):
+        # Tenta fallback na raiz da pasta shapefile
+        path_shp_alt = os.path.join(DATA_DIR, 'shapefile', nome_shp)
+        if os.path.exists(path_shp_alt):
+            path_shp = path_shp_alt
+        else:
+            # Se ainda não achar, erro
+            raise FileNotFoundError(f"Shapefile não encontrado em {path_shp}")
 
-    # --- DEBUG (Para garantir) ---
-    if not os.path.exists(shp_path):
-        print(f"❌ ERRO: Não achei o arquivo em: {shp_path}")
-        print("Confira se o nome 'PE_Municipios_2024.shp' está correto dentro da pasta.")
-        raise FileNotFoundError(f"Shapefile não encontrado.")
+    # 1. Carrega Shapefile
+    gdf = gpd.read_file(path_shp)
+    col_nome_shp = 'NM_MUN'
+    for col in gdf.columns:
+        if col in ['NM_MUNICIP', 'NM_MUN_2022', 'NOME']: 
+            col_nome_shp = col; break
+    gdf['NM_MUN_NORM'] = gdf[col_nome_shp].apply(normalizar_texto)
 
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"CSV do ano {ano} não encontrado.")
+    # 2. Carrega CSVs Dados
+    df_violencia = processar_csv(path_violencia, coluna_mes)
+    df_estupro = processar_csv(path_estupro, coluna_mes)
 
-    # --- PROCESSAMENTO (Igual ao anterior) ---
-    df = pd.read_csv(csv_path)
-    df['MUNICIPIO_NORM'] = df['MUNICIPIO'].astype(str).str.strip().apply(lambda x: unidecode(x).upper())
+    # 3. Carrega População
+    df_pop = None
+    if os.path.exists(path_populacao):
+        df_pop_raw = pd.read_csv(path_populacao)
+        df_pop = pd.DataFrame()
+        df_pop['MUNICIPIO_NORM'] = df_pop_raw.iloc[:,0].apply(normalizar_texto)
+        df_pop['populacao'] = df_pop_raw.iloc[:,1].fillna(1).astype(int)
+
+    # 4. Merges
     
-    if coluna_mes not in df.columns:
-        df['VALOR_FILTRADO'] = 0
+    # Merge Violencia
+    if df_violencia is not None:
+        gdf = gdf.merge(df_violencia, left_on='NM_MUN_NORM', right_on='MUNICIPIO_NORM', how='left')
+        gdf.rename(columns={'VALOR_MES': 'violencia'}, inplace=True)
+    else: gdf['violencia'] = 0
+
+    # Merge Estupro
+    if df_estupro is not None:
+        gdf = gdf.merge(df_estupro, left_on='NM_MUN_NORM', right_on='MUNICIPIO_NORM', how='left')
+        gdf.rename(columns={'VALOR_MES': 'estupro'}, inplace=True)
+    else: gdf['estupro'] = 0
+
+    # Merge População (CORRIGIDO AQUI)
+    if df_pop is not None:
+        # Usa left_on e right_on porque os nomes das colunas são diferentes
+        gdf = gdf.merge(df_pop, left_on='NM_MUN_NORM', right_on='MUNICIPIO_NORM', how='left')
     else:
-        df['VALOR_FILTRADO'] = df[coluna_mes].fillna(0).astype(int)
+        gdf['populacao'] = 1 
 
-    df_selecionado = df[['MUNICIPIO_NORM', 'MUNICIPIO', 'TOTAL', 'VALOR_FILTRADO']].copy()
-
-    gdf = gpd.read_file(shp_path)
+    # Limpeza
+    gdf['violencia'] = gdf['violencia'].fillna(0).astype(int)
+    gdf['estupro'] = gdf['estupro'].fillna(0).astype(int)
+    gdf['populacao'] = gdf['populacao'].fillna(1).astype(int)
     
-    # Ajuste aqui se a coluna do nome no shapefile não for 'NM_MUN'
-    # Às vezes o IBGE usa 'NM_MUNICIP' ou 'NM_MUN_2022'
-    coluna_nome_shapefile = 'NM_MUN' 
-    
-    if coluna_nome_shapefile not in gdf.columns:
-         # Tenta achar a coluna de nome automaticamente se não for NM_MUN
-         for col in gdf.columns:
-             if 'NM_' in col or 'NOME' in col:
-                 coluna_nome_shapefile = col
-                 break
-    
-    gdf['NM_MUN_NORM'] = gdf[coluna_nome_shapefile].apply(lambda x: unidecode(x).upper())
+    gdf['valor'] = gdf['violencia'] 
+    gdf['municipio'] = gdf[col_nome_shp]
 
-    gdf_final = gdf.merge(df_selecionado, left_on='NM_MUN_NORM', right_on='MUNICIPIO_NORM', how='left')
+    if gdf.crs != "EPSG:4326": gdf = gdf.to_crs(epsg=4326)
 
-    gdf_final['VALOR_FILTRADO'] = gdf_final['VALOR_FILTRADO'].fillna(0).astype(int)
-    gdf_final['TOTAL'] = gdf_final['TOTAL'].fillna(0).astype(int)
-    
-    # Renomeia para o front-end
-    gdf_final = gdf_final.rename(columns={'VALOR_FILTRADO': 'valor', 'TOTAL': 'total_ano', coluna_nome_shapefile: 'municipio'})
-
-    return gdf_final.to_json()
+    return gdf.to_json()
