@@ -1,9 +1,13 @@
 import os
 import pandas as pd
 import geopandas as gpd
-from unidecode import unidecode
+from utils.normalizer_str import normalizar_texto
+from utils.extract_date import enriquecer_datas
+from utils.col_numeric import tratar_metricas_vitimas
+from utils.read_archive import ler_arquivo_bruto
+from utils.pattern_municipios import padronizar_municipios
+from utils.read_archive import carregar_arquivo_generico
 
-# --- CONFIGURAÇÕES ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 
@@ -15,64 +19,25 @@ ARQUIVO_ESTUPRO   = 'MICRODADOS_ESTUPRO_JAN_2015_A_NOV_2025.xlsx'
 _CACHE_VIOLENCIA = None
 _CACHE_ESTUPRO = None
 
-def normalizar_texto(texto):
-    """Padroniza nomes de cidades (sem acento, maiúsculo)."""
-    if not isinstance(texto, str): return ""
-    return unidecode(texto).upper().strip()
 
-def carregar_arquivo_generico(nome_arquivo):
-    """
-    Função genérica que lê um Excel/CSV padrão SDS-PE e retorna o DataFrame processado.
-    """
-    caminho = os.path.join(DATA_DIR, nome_arquivo)
+def carregar_arquivo_processado(nome_arquivo):
+    df = ler_arquivo_bruto(nome_arquivo)
     
-    if not os.path.exists(caminho):
-        # Tenta versão CSV se o XLSX não existir
-        caminho_csv = caminho.replace('.xlsx', '.csv')
-        if os.path.exists(caminho_csv):
-            caminho = caminho_csv
-        else:
-            print(f"ERRO: Arquivo não encontrado: {nome_arquivo}")
-            return None
-
-    print(f"--- Carregando: {os.path.basename(caminho)} ---")
-    
-    try:
-        if caminho.endswith('.csv'):
-            df = pd.read_csv(caminho) # Adicione sep=';' se necessário
-        else:
-            df = pd.read_excel(caminho)
-
-        # 1. Normaliza Município
-        # Procura coluna de município
-        col_municipio = 'MUNICÍPIO DO FATO'
-        if col_municipio not in df.columns:
-            # Fallback: pega a primeira coluna que tiver 'MUNICIPIO' no nome
-            for col in df.columns:
-                if 'MUNICÍPIO' in col.upper() or 'MUNICIPIO' in col.upper():
-                    col_municipio = col
-                    break
-        
-        df['MUNICIPIO_NORM'] = df[col_municipio].apply(normalizar_texto)
-
-        # 2. Processa Datas (DATA DO FATO)
-        df['DATA_OBJ'] = pd.to_datetime(df['DATA DO FATO'], errors='coerce', dayfirst=True)
-        df['ANO_FATO'] = df['DATA_OBJ'].dt.year.fillna(0).astype(int)
-        df['MES_FATO'] = df['DATA_OBJ'].dt.month.fillna(0).astype(int)
-
-        # 3. Garante que Total de Vítimas é número
-        # Se a coluna não existir, assume 1 vítima por linha
-        if 'TOTAL DE VÍTIMAS' in df.columns:
-            df['TOTAL_VITIMAS'] = pd.to_numeric(df['TOTAL DE VÍTIMAS'], errors='coerce').fillna(1).astype(int)
-        else:
-            df['TOTAL_VITIMAS'] = 1
-
-        return df
-
-    except Exception as e:
-        print(f"Erro ao processar {nome_arquivo}: {e}")
+    if df is None:
         return None
 
+    # 2. Pipeline de Transformação
+    try:
+        df = padronizar_municipios(df)
+        df = enriquecer_datas(df)
+        df = tratar_metricas_vitimas(df)
+        
+        return df
+        
+    except Exception as e:
+        print(f"Erro no processamento lógico de {nome_arquivo}: {e}")
+        return None
+    
 def obter_dados_cacheados():
     """Gerencia o carregamento único (Singleton) dos dados."""
     global _CACHE_VIOLENCIA, _CACHE_ESTUPRO
